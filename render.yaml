@@ -1,0 +1,10 @@
+# Render blueprint — https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: apds
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    branch: main
+    autoDeploy: true
+    healthCheckPath: /api/health
