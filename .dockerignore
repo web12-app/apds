@@ -3,4 +3,5 @@
 **/__pycache__
 **/*.db
 frontend/dist
+backend/.env
 .gitignore

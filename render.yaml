@@ -8,3 +8,12 @@ services:
     branch: main
     autoDeploy: true
     healthCheckPath: /api/health
+    envVars:
+      - key: APP_KEY          # public client key (identifier, not a secret)
+        sync: false
+      - key: GITHUB_TOKEN     # server-side only — never expose
+        sync: false
+      - key: DATA_REPO
+        value: web12-app/dbs
+      - key: DB_PATH
+        value: /app/data/marketplace.db

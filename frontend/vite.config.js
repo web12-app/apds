@@ -7,7 +7,7 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      // Forward API calls to the Python backend
+      // Forward API calls to the Python backend in dev
       '/api': 'http://localhost:8000',
     },
   },

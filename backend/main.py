@@ -1,92 +1,111 @@
-"""apds backend — FastAPI + SQLite.
-
-Serves:
-  - /api/*   JSON API
-  - /*       built Vite frontend (frontend/dist), when present
-
-Run locally:  uvicorn main:app --reload --port 8000   (from backend/)
-Docs:         http://localhost:8000/docs
-
-Schema source of truth: private repo web12-app/dbs (schema.sql).
-"""
-
-import os
-import sqlite3
-from contextlib import closing
+"""APDS — app marketplace API + static frontend assembly."""
+import logging
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
-DB_PATH = Path(os.environ.get("DB_PATH", str(Path(__file__).with_name("dbs.db"))))
-FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+from .config import settings
+from .db import init_db
+from .gitstore import gitstore
+from .routers_apps import router as apps_router
+from .routers_auth import router as auth_router
+from .routers_dev import router as dev_router
+from .routers_uploads import router as uploads_router
 
-app = FastAPI(title="apds API", version="0.1.0")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+log = logging.getLogger("apds")
 
+app = FastAPI(
+    title="APDS Marketplace",
+    version="1.0.0",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,  # internal API surface is not advertised
+)
 
-def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def init_db():
-    with closing(get_db()) as db, closing(db.cursor()) as cur:
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS records (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                name       TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT (datetime('now'))
-            )
-            """
-        )
-        db.commit()
-
-
-class RecordIn(BaseModel):
-    name: str
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["X-App-Key", "X-API-Key", "Authorization", "Content-Type", "X-Upload-Token"],
+    expose_headers=["X-Demo-Package", "X-Checksum-Sha256", "Content-Disposition"],
+)
 
 
 @app.on_event("startup")
-def startup():
+async def startup() -> None:
     init_db()
+    log.info("APDS marketplace API ready")
 
+
+@app.on_event("shutdown")
+async def shutdown() -> None:
+    await gitstore.aclose()
+
+
+# ---- public bootstrap routes (no app key required) ----
 
 @app.get("/api/health")
-def health():
+async def health():
     return {"status": "ok"}
 
 
-@app.get("/api/records")
-def list_records():
-    with closing(get_db()) as db, closing(db.cursor()) as cur:
-        cur.execute("SELECT id, name, created_at FROM records ORDER BY id DESC")
-        return [dict(row) for row in cur.fetchall()]
+@app.get("/api/meta")
+async def meta():
+    return {
+        "name": "APDS",
+        "tagline": "Discover. Download. Create.",
+        "app_key": settings.app_key,
+        "max_upload_mb": settings.max_upload_mb,
+    }
 
 
-@app.post("/api/records", status_code=201)
-def create_record(rec: RecordIn):
-    name = rec.name.strip()
-    if not name:
-        raise HTTPException(status_code=422, detail="name must not be empty")
-    with closing(get_db()) as db, closing(db.cursor()) as cur:
-        cur.execute("INSERT INTO records (name) VALUES (?)", (name,))
-        db.commit()
-        return {"id": cur.lastrowid, "name": name}
+# ---- error handling: never leak internals ----
+
+@app.exception_handler(StarletteHTTPException)
+async def http_error(request: Request, exc: StarletteHTTPException):
+    return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
 
 
-@app.delete("/api/records/{record_id}", status_code=204)
-def delete_record(record_id: int):
-    with closing(get_db()) as db, closing(db.cursor()) as cur:
-        cur.execute("DELETE FROM records WHERE id = ?", (record_id,))
-        db.commit()
-        if cur.rowcount == 0:
-            raise HTTPException(status_code=404, detail="record not found")
+@app.exception_handler(Exception)
+async def unhandled_error(request: Request, exc: Exception):
+    log.exception("unhandled error on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        {"detail": "Unable to complete this request. Please try again."}, status_code=500
+    )
 
 
-# Serve the built Vite frontend (present when built via Dockerfile or npm run build).
-# Mounted last, so /api/* routes take precedence.
-if FRONTEND_DIST.is_dir():
-    app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")
+app.include_router(auth_router)
+app.include_router(apps_router)
+app.include_router(uploads_router)
+app.include_router(dev_router)
+
+
+# ---- SPA static hosting (built Vite frontend) ----
+
+DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+
+
+class SPAStatic(StaticFiles):
+    async def get_response(self, path: str, scope):
+        if path.startswith("api"):
+            raise StarletteHTTPException(status_code=404, detail="Not found.")
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException:
+            return await super().get_response("index.html", scope)
+
+
+if DIST.is_dir():
+    app.mount("/", SPAStatic(directory=DIST, html=True), name="spa")
+else:  # development without a frontend build
+    @app.get("/")
+    async def root():
+        return Response(
+            "APDS API is running. Build the frontend (npm run build) to serve the app.",
+            media_type="text/plain",
+        )
