@@ -39,7 +39,45 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup() -> None:
     init_db()
+    _ensure_demo_account()
     log.info("APDS marketplace API ready")
+
+
+def _ensure_demo_account() -> None:
+    """Free-tier instances lose their local disk on every deploy.
+
+    The catalog lives in git and survives, but the local SQLite (accounts,
+    sessions, keys) is ephemeral. Recreate the demo account on startup so the
+    marketplace always has a working login + developer profile. Disable by
+    setting ENABLE_DEMO_ACCOUNT=0.
+    """
+    import os
+
+    if os.environ.get("ENABLE_DEMO_ACCOUNT", "1") != "1":
+        return
+    from .db import db, new_id, notify, utcnow
+    from .security import hash_password
+
+    username = os.environ.get("DEMO_USERNAME", "demo")
+    password = os.environ.get("DEMO_PASSWORD", "demo1234")
+    with db() as conn:
+        if conn.execute("SELECT 1 FROM users WHERE username = ?", (username,)).fetchone():
+            return
+        uid = new_id("usr")
+        conn.execute(
+            "INSERT INTO users (id, username, email, password_hash, created_at) VALUES (?,?,?,?,?)",
+            (uid, username, "demo@apds.dev", hash_password(password), utcnow()),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO developers (id, user_id, name, slug, bio, website, created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (new_id("dev"), uid, "APDS Studio", "apds-studio",
+             "Demo developer account — showcase of the publish pipeline.",
+             "https://apds.onrender.com", utcnow()),
+        )
+        notify(conn, uid, "welcome", "Welcome to APDS",
+               "Demo account ready. Explore the store or open the Developer tab to publish.")
+    log.info("demo account ready (%s)", username)
 
 
 @app.on_event("shutdown")
