@@ -34,19 +34,29 @@ export function AppProvider({ children }) {
   }, [theme, applyTheme])
   const setTheme = (mode) => { localStorage.setItem(THEME_KEY, mode); setThemeState(mode) }
 
-  // ---- boot ----
+  // ---- boot (cold-start resilient: keeps retrying in the background) ----
   useEffect(() => {
+    let stopped = false
     ;(async () => {
       try {
         await bootstrap()
         const { user } = await api('/api/account').catch(() => ({ user: null }))
-        setUser(user)
+        if (!stopped) setUser(user)
       } catch {
-        /* API down — app still renders */
+        const timer = setInterval(async () => {
+          try {
+            await bootstrap()
+            const { user } = await api('/api/account').catch(() => ({ user: null }))
+            if (stopped) { clearInterval(timer); return }
+            setUser(user)
+            clearInterval(timer)
+          } catch { /* still waking — keep trying */ }
+        }, 15000)
       } finally {
-        setReady(true)
+        if (!stopped) setReady(true)
       }
     })()
+    return () => { stopped = true }
   }, [])
 
   const refreshUser = useCallback(async () => {

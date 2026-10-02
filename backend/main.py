@@ -95,9 +95,13 @@ class SPAStatic(StaticFiles):
         if path.startswith("api"):
             raise StarletteHTTPException(status_code=404, detail="Not found.")
         try:
-            return await super().get_response(path, scope)
+            resp = await super().get_response(path, scope)
         except StarletteHTTPException:
-            return await super().get_response("index.html", scope)
+            resp = await super().get_response("index.html", scope)
+        # never let browsers cache a stale app shell across deploys
+        if "text/html" in (resp.media_type or ""):
+            resp.headers["Cache-Control"] = "no-cache"
+        return resp
 
 
 if DIST.is_dir():

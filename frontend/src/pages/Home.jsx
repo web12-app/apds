@@ -26,6 +26,27 @@ export default function Home() {
     })()
   }, [])
 
+  // auto-retry while the service is waking up
+  useEffect(() => {
+    if (!error) return
+    const t = setTimeout(() => {
+      setError('')
+      ;(async () => {
+        try {
+          const [list, categories] = await Promise.all([
+            api('/api/apps?limit=100'),
+            api('/api/categories'),
+          ])
+          setApps(list.items)
+          setCats(categories)
+        } catch (err) {
+          setError(err)
+        }
+      })()
+    }, 12000)
+    return () => clearTimeout(t)
+  }, [error])
+
   const featured = useMemo(() => (apps || []).filter(a => a.featured), [apps])
   const trending = useMemo(() => (apps || []).filter(a => a.trending), [apps])
   const fresh = useMemo(

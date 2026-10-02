@@ -1,0 +1,23 @@
+name: Keep awake
+
+# Free web services sleep after ~15 minutes of inactivity, which makes the
+# first visit slow (cold start). This lightweight health ping keeps the
+# instance warm. Disable it (or upgrade the Render plan) if unwanted.
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Health ping
+        run: |
+          code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 180 https://apds.onrender.com/api/health)
+          echo "health check: $code"
+          if [ "$code" != "200" ] && [ "$code" != "503" ]; then
+            echo "unexpected status, but leaving restarts to Render"
+          fi

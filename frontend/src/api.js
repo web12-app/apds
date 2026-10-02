@@ -1,10 +1,13 @@
 // APDS frontend API layer.
 // - Every call carries the public X-App-Key (client identifier, fetched from /api/meta).
 // - Identity rides on the httpOnly session cookie.
+// - Cold-start resilient: bootstrap retries with backoff, every request retries
+//   transient failures (network errors / 5xx) so a waking service self-heals.
 // - XHR helpers give upload/download progress, speed, ETA, cancel & retry.
 
 let APP_KEY = null
 let META = null
+let bootPromise = null
 
 export class ApiError extends Error {
   constructor(status, detail) {
@@ -14,32 +17,65 @@ export class ApiError extends Error {
   }
 }
 
-export async function bootstrap() {
-  const r = await fetch('/api/meta')
-  META = await r.json()
-  APP_KEY = META.app_key
-  return META
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+export async function bootstrap({ retries = 15, delay = 5000 } = {}) {
+  if (APP_KEY) return META
+  if (bootPromise) return bootPromise
+  bootPromise = (async () => {
+    for (let i = 1; i <= retries; i++) {
+      try {
+        const r = await fetch('/api/meta', { cache: 'no-store' })
+        if (r.ok) {
+          META = await r.json()
+          APP_KEY = META.app_key
+          return META
+        }
+      } catch { /* service waking — retry */ }
+      if (i < retries) await sleep(Math.min(delay * i, 8000))
+    }
+    bootPromise = null
+    throw new ApiError(503, 'The service is waking up — please wait a moment and try again.')
+  })()
+  return bootPromise
 }
 
 export function getMeta() {
   return META
 }
 
+const TRANSIENT = [502, 503, 504, 521, 522, 523, 524, 530]
+
 export async function api(path, { method = 'GET', body, headers = {} } = {}) {
-  const res = await fetch('/api' + path, {
-    method,
-    credentials: 'same-origin',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-App-Key': APP_KEY,
-      ...headers,
-    },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  })
-  let data = {}
-  try { data = await res.json() } catch { /* empty body */ }
-  if (!res.ok) throw new ApiError(res.status, data.detail || 'Unable to complete this request.')
-  return data
+  if (!APP_KEY) await bootstrap()
+
+  let lastErr = null
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) await sleep(2500 * attempt)
+    let res
+    try {
+      res = await fetch('/api' + path, {
+        method,
+        credentials: 'same-origin',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-App-Key': APP_KEY,
+          ...headers,
+        },
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+      })
+    } catch (e) {
+      lastErr = e // network error (service waking / offline) — retry
+      continue
+    }
+    if (TRANSIENT.includes(res.status) && attempt < 2) continue
+
+    let data = {}
+    try { data = await res.json() } catch { /* empty body */ }
+    if (!res.ok) throw new ApiError(res.status, data.detail || 'Unable to complete this request.')
+    return data
+  }
+  throw lastErr || new ApiError(0, 'Network error — the service may be waking up. Please retry.')
 }
 
 export async function sha256Hex(file) {
